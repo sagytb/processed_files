@@ -1,0 +1,26 @@
+# Environment variables - DO NOT UPLOAD API KEY!
+.env
+
+# Virtual environment folder
+env/
+new_env/
+
+# Database and state files
+*.sqlite
+*.json
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE/Editor specific files
+.vscode/
+.idea/
+
+# --- NEW: IGNORE DATA FOLDERS ---
+2024/
+streamlit-sqlite-starter/
+app_hebrew.txt
+processing_hebrew.txt
+run_conversion.bat

@@ -1,0 +1,11 @@
+streamlit
+pandas
+PyMuPDF
+python-dotenv
+langchain-openai
+langchain-community
+sqlalchemy
+langdetect
+pytesseract
+Pillow
+xlsxwriter
