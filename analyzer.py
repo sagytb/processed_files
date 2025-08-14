@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE HYBRID VERSION: Auto-detects environment (Local vs. Cloud) and adjusts functionality accordingly.
+# FINAL COMPLETE HYBRID VERSION: Correctly handles secrets and all UI functionalities for both local and cloud environments.
 
 import streamlit as st
 import pandas as pd
@@ -18,26 +18,31 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 
 # --- Setup for Cloud and Local ---
-# Load .env file for local development
 load_dotenv()
 
-# Hybrid API Key Retrieval: Try Streamlit secrets first, fallback to .env file.
-DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY", os.getenv("DEEPSEEK_API_KEY"))
-
-# Environment Detection
+# Smartly detect the environment and load secrets accordingly
 IS_CLOUD = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() == 'true'
+DEEPSEEK_API_KEY = "" # Initialize variable
+
+if IS_CLOUD:
+    DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY")
+else:
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+if not DEEPSEEK_API_KEY:
+    st.error("מפתח API של DeepSeek לא הוגדר. בסביבה מקומית, ודא שהוא קיים בקובץ .env. בענן, ודא שהגדרת אותו ב-Secrets.")
+    st.stop()
 
 DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite"
 LOCAL_DB_PATH = "reports.sqlite"
 
 # --- Database Setup & Download Function ---
-@st.cache_resource(ttl=3600) # Cache the DB connection for an hour
+@st.cache_resource(ttl=3600)
 def setup_database():
-    """Downloads the database if running in the cloud and it doesn't exist, then sets up the connection."""
     if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
-        st.info("קובץ בסיס הנתונים לא נמצא מקומית, מוריד את הגרסה העדכנית מ-Hugging Face... ☁️")
+        st.info("קובץ בסיס הנתונים לא נמצא, מוריד את הגרסה העדכנית מ-Hugging Face... ☁️")
         try:
-            with st.spinner("מתבצעת הורדה... זה עשוי לקחת מספר רגעים, תלוי בגודל בסיס הנתונים."):
+            with st.spinner("מתבצעת הורדה... זה עשוי לקחת מספר רגעים."):
                 r = requests.get(DB_URL, stream=True)
                 r.raise_for_status()
                 with open(LOCAL_DB_PATH, 'wb') as f:
@@ -50,13 +55,12 @@ def setup_database():
             return None
             
     if not os.path.exists(LOCAL_DB_PATH):
-        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ תחילה את סקריפט העיבוד 'process_files.py' על תיקיית הקבצים שלך.")
+        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ תחילה את סקריפט העיבוד 'process_files.py'.")
         return None
 
     engine = db.create_engine(f'sqlite:///{LOCAL_DB_PATH}')
     Base = declarative_base()
     
-    # Define schema here to be available for the session
     global Document, Finding, Contact, AutoContact
     class Document(Base):
         __tablename__ = 'documents'; id = Column(Integer, primary_key=True); filename = Column(String); company_name = Column(String); full_text = Column(Text); language = Column(String); findings = relationship("Finding", back_populates="document"); auto_contacts = relationship("AutoContact", back_populates="document")
@@ -192,19 +196,14 @@ elif page == "contacts_page":
     if not auto_contacts_df.empty:
         st.dataframe(auto_contacts_df, use_container_width=True)
         st.download_button(label="📥 ייצא רשימה אוטומטית לאקסל", data=to_excel(auto_contacts_df), file_name="אנשי_קשר_אוטומטי.xlsx")
-    else:
-        st.info("לא חולצו אנשי קשר באופן אוטומטי מהמסמכים.")
+    else: st.info("לא חולצו אנשי קשר באופן אוטומטי מהמסמכים.")
     st.markdown("---")
     
-    # --- Show different UI for Local vs. Cloud ---
     if not IS_CLOUD:
         # LOCAL: Full functionality
         with st.form("contact_form", clear_on_submit=True):
             st.subheader("הוספת איש קשר ידנית")
-            c1, c2 = st.columns(2)
-            first_name = c1.text_input("שם פרטי"); last_name = c2.text_input("שם משפחה")
-            company = c1.text_input("שם חברה"); role = c2.text_input("תפקיד")
-            phone = c1.text_input("טלפון"); email = c2.text_input("כתובת מייל")
+            c1, c2 = st.columns(2); first_name = c1.text_input("שם פרטי"); last_name = c2.text_input("שם משפחה"); company = c1.text_input("שם חברה"); role = c2.text_input("תפקיד"); phone = c1.text_input("טלפון"); email = c2.text_input("כתובת מייל")
             if st.form_submit_button("שמור איש קשר"):
                 if not first_name or not last_name: st.error("שם פרטי ושם משפחה הם שדות חובה.")
                 else:
@@ -217,8 +216,7 @@ elif page == "contacts_page":
         st.subheader("רשימת אנשי קשר (ידנית)")
         contacts_df = get_contacts_df(manual=True)
         search_term = st.text_input("חפש איש קשר:")
-        if search_term:
-            contacts_df = contacts_df[contacts_df.apply(lambda row: search_term.lower() in ' '.join(row.astype(str)).lower(), axis=1)]
+        if search_term: contacts_df = contacts_df[contacts_df.apply(lambda row: search_term.lower() in ' '.join(row.astype(str)).lower(), axis=1)]
         if not contacts_df.empty:
             if 'original_contacts' not in st.session_state or not st.session_state.original_contacts.equals(contacts_df):
                 st.session_state.original_contacts = contacts_df.copy()
@@ -236,8 +234,7 @@ elif page == "contacts_page":
                 except Exception as e:
                     session.rollback(); st.error(f"שגיאה בעדכון: {e}")
                 finally: session.close()
-        else:
-            st.info("לא נמצאו אנשי קשר." if search_term else "עדיין לא נוספו אנשי קשר.")
+        else: st.info("לא נמצאו אנשי קשר." if search_term else "עדיין לא נוספו אנשי קשר.")
     else:
         # CLOUD: Read-only mode
         st.info("ניהול אנשי קשר (הוספה ועריכה) אפשרי רק בגרסה המקומית של האפליקציה.")
@@ -246,5 +243,4 @@ elif page == "contacts_page":
         if not manual_contacts_df.empty:
             st.dataframe(manual_contacts_df.drop(columns=['מזהה']), use_container_width=True)
             st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(manual_contacts_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
-        else:
-            st.info("לא הוספו אנשי קשר באופן ידני.")
+        else: st.info("לא הוספו אנשי קשר באופן ידני.")
