@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE HYBRID VERSION: Correctly handles secrets and all UI functionalities for both local and cloud environments.
+# FINAL COMPLETE HYBRID VERSION: Auto-detects environment (Local vs. Cloud) and adjusts functionality accordingly.
 
 import streamlit as st
 import pandas as pd
@@ -18,6 +18,7 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 
 # --- Setup for Cloud and Local ---
+# Load .env file for local development
 load_dotenv()
 
 # Smartly detect the environment and load secrets accordingly
@@ -25,8 +26,10 @@ IS_CLOUD = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() 
 DEEPSEEK_API_KEY = "" # Initialize variable
 
 if IS_CLOUD:
+    # In the cloud, get the secret from Streamlit's secrets manager
     DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY")
 else:
+    # Locally, get the secret from the .env file
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 if not DEEPSEEK_API_KEY:
@@ -37,12 +40,13 @@ DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sq
 LOCAL_DB_PATH = "reports.sqlite"
 
 # --- Database Setup & Download Function ---
-@st.cache_resource(ttl=3600)
+@st.cache_resource(ttl=3600) # Cache the DB connection for an hour
 def setup_database():
+    """Downloads the database if running in the cloud and it doesn't exist, then sets up the connection."""
     if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
         st.info("קובץ בסיס הנתונים לא נמצא, מוריד את הגרסה העדכנית מ-Hugging Face... ☁️")
         try:
-            with st.spinner("מתבצעת הורדה... זה עשוי לקחת מספר רגעים."):
+            with st.spinner("מתבצעת הורדה... זה עשוי לקחת מספר רגעים, תלוי בגודל בסיס הנתונים."):
                 r = requests.get(DB_URL, stream=True)
                 r.raise_for_status()
                 with open(LOCAL_DB_PATH, 'wb') as f:
@@ -55,7 +59,7 @@ def setup_database():
             return None
             
     if not os.path.exists(LOCAL_DB_PATH):
-        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ תחילה את סקריפט העיבוד 'process_files.py'.")
+        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ תחילה את סקריפט העיבוד 'process_files.py' על תיקיית הקבצים שלך.")
         return None
 
     engine = db.create_engine(f'sqlite:///{LOCAL_DB_PATH}')
@@ -131,6 +135,18 @@ def ai_asset_search(question: str):
         chain = prompt | get_deepseek_llm() | StrOutputParser()
         return chain.invoke({"question": question, "context": context})
     finally: session.close()
+
+def parse_markdown_to_df(markdown_text):
+    try:
+        table_start = markdown_text.find('|');
+        if table_start == -1: return None
+        from io import StringIO
+        cleaned = "\n".join([l.strip() for l in markdown_text[table_start:].strip().split('\n') if '|' in l and '---' not in l])
+        df = pd.read_csv(StringIO(cleaned), sep='|', index_col=False).iloc[:, 1:-1]
+        df.columns = [c.strip() for c in df.columns];
+        if df.empty: return None
+        return df
+    except Exception: return None
 
 # --- UI Section ---
 st.set_page_config(layout="wide", page_title="מנתח דוחות פיננסיים", page_icon="🤖")
