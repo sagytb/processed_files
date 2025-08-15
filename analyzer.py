@@ -43,7 +43,7 @@ def run_app():
     @st.cache_resource(ttl=3600)
     def setup_database():
         if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
-            info_message = st.info("קובץ בסיס הנתונים לא נמצא, מתחיל הורדה מ-Hugging Face... ☁️")
+            info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
             progress_bar = st.progress(0, text="מתחיל הורדה...")
             try:
                 r = requests.get(DB_URL, stream=True)
@@ -222,6 +222,7 @@ def run_app():
             st.download_button(label="📥 ייצא רשימה אוטומטית לאקסל", data=to_excel(auto_contacts_df), file_name="אנשי_קשר_אוטומטי.xlsx")
         else: st.info("לא חולצו אנשי קשר באופן אוטומטי מהמסמכים.")
         st.markdown("---")
+        
         if not IS_CLOUD:
             with st.form("contact_form", clear_on_submit=True):
                 st.subheader("הוספת איש קשר ידנית")
