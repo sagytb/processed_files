@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL ULTIMATE HYBRID VERSION: Corrected NameError scope issue for robust startup.
+# FINAL COMPLETE HYBRID VERSION: Fixed the UnhashableParamError by creating DB sessions inside cached functions.
 
 import streamlit as st
 import pandas as pd
@@ -18,36 +18,41 @@ from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 
-# --- Step 1: Basic Setup ---
-st.set_page_config(layout="wide", page_title="מנתח דוחות פיננסיים", page_icon="🤖")
-st.markdown("""<style>.stApp { direction: rtl; } .stTextInput > div > div > input, .stTextArea > div > div > textarea { text-align: right; }</style>""", unsafe_allow_html=True)
+# --- Setup for Cloud and Local ---
+load_dotenv()
+IS_CLOUD = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() == 'true'
+DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY") if IS_CLOUD else os.getenv("DEEPSEEK_API_KEY")
 
-# --- Step 2: Define ALL functions first ---
+DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite"
+LOCAL_DB_PATH = "reports.sqlite"
 
-# This function is now defined globally
+# --- Database Setup & Download Function ---
 @st.cache_resource(ttl=3600)
-def setup_database(is_cloud, db_url, local_path):
-    if is_cloud and not os.path.exists(local_path):
-        info_message = st.info("קובץ בסיס הנתונים לא נמצא, מתחיל הורדה מ-Hugging Face... ☁️")
+def get_db_session_factory():
+    """
+    Downloads DB if needed and returns a SESSION FACTORY (not a session object).
+    This factory can be used to create new sessions and is cacheable.
+    """
+    if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
+        info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
         progress_bar = st.progress(0, text="מתחיל הורדה...")
         try:
-            r = requests.get(db_url, stream=True); r.raise_for_status()
+            r = requests.get(DB_URL, stream=True); r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0)); bytes_downloaded = 0
-            with open(local_path, 'wb') as f:
+            with open(LOCAL_DB_PATH, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk); bytes_downloaded += len(chunk)
                     if total_size > 0:
                         progress = bytes_downloaded / total_size
                         progress_bar.progress(progress, text=f"מוריד... {int(progress * 100)}%")
-            progress_bar.empty(); info_message.success("הורדת בסיס הנתונים הושלמה!"); time.sleep(2); info_message.empty();
+            progress_bar.empty(); info_message.success("הורדת בסיס הנתונים הושלמה!"); time.sleep(2); info_message.empty()
         except requests.exceptions.RequestException as e:
             info_message.error(f"שגיאה בהורדת בסיס הנתונים: {e}"); return None
             
-    if not os.path.exists(local_path):
-        st.error(f"קובץ בסיס הנתונים '{local_path}' לא נמצא. אנא הרץ 'process_files.py'.")
-        return None
+    if not os.path.exists(LOCAL_DB_PATH):
+        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ 'process_files.py'."); return None
 
-    engine = db.create_engine(f'sqlite:///{local_path}')
+    engine = db.create_engine(f'sqlite:///{LOCAL_DB_PATH}')
     Base = declarative_base()
     
     global Document, Finding, Contact, AutoContact
@@ -56,12 +61,14 @@ def setup_database(is_cloud, db_url, local_path):
     class Finding(Base):
         __tablename__ = 'findings'; id=Column(Integer, primary_key=True); document_id=Column(Integer, ForeignKey('documents.id')); category=Column(String); finding_text=Column(Text); document=relationship("Document", back_populates="findings")
     class Contact(Base):
-        __tablename__ = 'contacts'; id=Column(Integer, primary_key=True, autoincrement=True); first_name=Column(String); last_name=Column(String); company=Column(String); role=Column(String); phone=Column(String); email=Column(String)
+        __tablename__ = 'contacts'; id=Column(Integer, primary_key=True); first_name=Column(String); last_name=Column(String); company=Column(String); role=Column(String); phone=Column(String); email=Column(String)
     class AutoContact(Base):
-        __tablename__ = 'auto_contacts'; id=Column(Integer, primary_key=True, autoincrement=True); document_id=Column(Integer, ForeignKey('documents.id')); name=Column(String); role=Column(String); email=Column(String); phone=Column(String); document=relationship("Document", back_populates="auto_contacts")
+        __tablename__ = 'auto_contacts'; id=Column(Integer, primary_key=True); document_id=Column(Integer, ForeignKey('documents.id')); name=Column(String); role=Column(String); email=Column(String); phone=Column(String); document=relationship("Document", back_populates="auto_contacts")
     
+    Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
 
+# --- Querying Functions ---
 def to_excel(df: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -73,8 +80,10 @@ def to_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 @st.cache_data(ttl=3600)
-def get_predefined_reports(Session):
-    session = Session(); reports = {}; 
+def get_predefined_reports():
+    Session = get_db_session_factory()
+    if not Session: return {}
+    session = Session(); reports = {}
     report_queries = {"נדל\"ן בישראל": "real_estate_israel", "קרקעות כמלאי בישראל": "land_inventory_israel", "נדל\"ן בארה\"ב": "real_estate_usa", "נדל\"ן באירופה": "real_estate_europe", "משקיעות בסטארטאפים": "startup_investments", "חברות בתחום האנרגיה": "energy_sector", "קניונים מתוכננים": "malls_planned", "מרכזים מסחריים מתוכננים": "commercial_centers_planned", "שכונות חדשות מתוכננות": "new_neighborhoods", "מגורים ומסחר משולב": "mixed_use_residential"}
     try:
         for name, category in report_queries.items():
@@ -83,7 +92,9 @@ def get_predefined_reports(Session):
     return reports
 
 @st.cache_data(ttl=60)
-def get_contacts_df(Session, manual=True):
+def get_contacts_df(manual=True):
+    Session = get_db_session_factory()
+    if not Session: return pd.DataFrame()
     session = Session()
     try:
         if manual:
@@ -92,15 +103,17 @@ def get_contacts_df(Session, manual=True):
             query = (session.query(Document.company_name, AutoContact.name, AutoContact.role, AutoContact.email, AutoContact.phone, Document.filename).join(AutoContact)); df = pd.read_sql(query.statement, session.bind); return df.rename(columns={'company_name': 'שם חברה (בדוח)', 'name': 'שם איש קשר', 'role': 'תפקיד', 'email': 'מייל', 'phone': 'טלפון', 'filename': 'קובץ מקור'})
     finally: session.close()
 
-def get_deepseek_llm(api_key):
-    return ChatOpenAI(model="deepseek-chat", api_key=api_key, base_url="https://api.deepseek.com/v1", temperature=0)
+def get_deepseek_llm():
+    return ChatOpenAI(model="deepseek-chat", api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1", temperature=0)
 
-def ai_asset_search(Session, api_key, question: str):
+def ai_asset_search(question: str):
+    Session = get_db_session_factory()
+    if not Session: return "שגיאה: לא ניתן להתחבר לבסיס הנתונים."
     session = Session()
     try:
         search_terms = re.findall(r'\b\w+\b', question); finding_filter = [Finding.finding_text.like(f'%{term}%') for term in search_terms]; candidate_findings = (session.query(Document.company_name, Document.filename, Finding.finding_text).join(Finding).filter(db.or_(Finding.category == 'real_estate_israel', Finding.category == 'land_inventory_israel'), db.or_(*finding_filter)).limit(30).all())
         if not candidate_findings: return "לא נמצאו ממצאים ראשוניים התואמים לשאלתך."
-        context = "\n\n".join(f"Company: {f.company_name}, File: {f.filename}\nFinding: {f.finding_text}" for f in candidate_findings); summarize_template = "Based *only* on the provided findings about Israeli real estate, answer the user's question. Create a Markdown table. User's Question: {question}. Findings: {context}. Final Answer (as a Markdown table in Hebrew):"; prompt = ChatPromptTemplate.from_template(summarize_template); chain = prompt | get_deepseek_llm(api_key) | StrOutputParser(); return chain.invoke({"question": question, "context": context})
+        context = "\n\n".join(f"Company: {f.company_name}, File: {f.filename}\nFinding: {f.finding_text}" for f in candidate_findings); summarize_template = "Based *only* on the provided findings about Israeli real estate, answer the user's question. Create a Markdown table. User's Question: {question}. Findings: {context}. Final Answer (as a Markdown table in Hebrew):"; prompt = ChatPromptTemplate.from_template(summarize_template); chain = prompt | get_deepseek_llm() | StrOutputParser(); return chain.invoke({"question": question, "context": context})
     finally: session.close()
 
 def parse_markdown_to_df(markdown_text):
@@ -115,123 +128,109 @@ def parse_markdown_to_df(markdown_text):
         return df
     except Exception: return None
 
-# --- Main Execution Flow ---
-load_dotenv()
-IS_CLOUD = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() == 'true'
-DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY") if IS_CLOUD else os.getenv("DEEPSEEK_API_KEY")
+# --- Main App Logic ---
+st.set_page_config(layout="wide", page_title="מנתח דוחות פיננסיים", page_icon="🤖"); st.markdown("""<style>.stApp { direction: rtl; }</style>""", unsafe_allow_html=True);
+st.title("🤖 מנתח דוחות פיננסיים")
+if not DEEPSEEK_API_KEY: st.error("מפתח API של DeepSeek לא הוגדר."); st.stop()
 
-if not DEEPSEEK_API_KEY:
-    st.error("מפתח API של DeepSeek לא הוגדר. אנא הגדר אותו והפעל מחדש.")
-else:
-    Session = setup_database(
-        is_cloud=IS_CLOUD,
-        db_url="https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite",
-        local_path="reports.sqlite"
-    )
+Session_factory = get_db_session_factory()
 
-    if Session:
-        st.title("🤖 מנתח דוחות פיננסיים")
-        PAGES = {"📊 דוחות ראשיים": "main_reports", "🏠 איתור נכסים בישראל": "asset_search", "👥 אנשי קשר": "contacts_page"}
-        st.sidebar.title("ניווט")
-        selection = st.sidebar.radio("בחר עמוד:", list(PAGES.keys()))
-        page = PAGES[selection]
-
-        if page == "main_reports":
-            st.header("דוחות מסכמים")
-            st.info("הדוחות להלן מציגים ממצאים שחולצו אוטומטית מכלל המסמכים.")
-            reports = get_predefined_reports(Session)
-            for report_name, df in reports.items():
-                with st.expander(f"**{report_name}** ({len(df)} ממצאים)"):
-                    if not df.empty:
-                        display_df = df.rename(columns={'company_name': 'שם חברה', 'finding_text': 'ממצא', 'filename': 'שם קובץ'})
-                        st.dataframe(display_df, use_container_width=True)
-                        st.download_button(label=f"📥 ייצא את רשימת '{report_name}' לאקסל", data=to_excel(display_df), file_name=f"{report_name.replace('\"', '')}.xlsx", key=f"export_{report_name}")
-                    else: st.write("לא נמצאו ממצאים בקטגוריה זו.")
-
-        elif page == "asset_search":
-            st.header("איתור נכסים בישראל")
-            tab1, tab2 = st.tabs(["💬 שיחה עם AI", "🔍 חיפוש פשוט"])
-            with tab1:
-                st.info("שאל שאלה בשפה חופשית על נכסים בישראל. ה-AI יחפש בממצאים הרלוונטיים ויסכם את התשובה.")
-                if "asset_messages" not in st.session_state: st.session_state.asset_messages = []
-                for msg in st.session_state.asset_messages:
-                    with st.chat_message(msg["role"]): st.markdown(msg["content"])
-                if prompt := st.chat_input("לדוגמה: אילו חברות מחזיקות קרקעות בחיפה?"):
-                    st.session_state.asset_messages.append({"role": "user", "content": prompt}); st.rerun()
-                if st.session_state.asset_messages and st.session_state.asset_messages[-1]["role"] == "user":
-                    with st.chat_message("assistant"):
-                        with st.spinner("חושב..."):
-                            response = ai_asset_search(Session, st.session_state.asset_messages[-1]["content"])
-                            st.markdown(response); st.session_state.asset_messages.append({"role": "assistant", "content": response}); st.rerun()
-            with tab2:
-                st.info("הזן מונח (עיר, רחוב, סוג נכס) לחיפוש מהיר בכל הטקסטים של הדוחות.")
-                keyword = st.text_input("הזן מונח לחיפוש:", key="keyword_search")
-                if st.button("חפש", key="search_button"):
-                    if keyword:
-                        with st.spinner("מחפש..."):
-                            session = Session(); results = session.query(Document.company_name, Document.filename, Document.full_text).filter(Document.full_text.like(f'%{keyword}%')).limit(50).all(); session.close()
-                            if results:
-                                st.success(f"נמצאו {len(results)} מסמכים המכילים את המונח '{keyword}':")
-                                for doc in results:
-                                    try:
-                                        safe_keyword = re.escape(keyword); match = re.search(safe_keyword, doc.full_text, re.IGNORECASE)
-                                        if match:
-                                            snippet = doc.full_text[max(0, match.start() - 80):match.end() + 80]
-                                            highlighted_snippet = re.sub(f'({safe_keyword})', r'**\1**', snippet, flags=re.IGNORECASE)
-                                            st.info(f"**חברה:** {doc.company_name} | **קובץ:** {doc.filename}"); st.markdown(f'<div dir="rtl">...{highlighted_snippet}...</div>', unsafe_allow_html=True)
-                                    except Exception as e: st.warning(f"לא ניתן היה להציג קטע מתוך '{doc.filename}': {e}")
-                            else: st.warning(f"המונח '{keyword}' לא נמצא באף מסמך.")
-                    else: st.warning("אנא הזן מונח לחיפוש.")
-
-        elif page == "contacts_page":
-            st.header("ניהול אנשי קשר")
-            st.subheader("אנשי קשר שחולצו אוטומטית מהדוחות")
-            auto_contacts_df = get_contacts_df(Session, manual=False)
-            if not auto_contacts_df.empty:
-                st.dataframe(auto_contacts_df, use_container_width=True)
-                st.download_button(label="📥 ייצא רשימה אוטומטית לאקסל", data=to_excel(auto_contacts_df), file_name="אנשי_קשר_אוטומטי.xlsx")
-            else: st.info("לא חולצו אנשי קשר באופן אוטומטי מהמסמכים.")
-            st.markdown("---")
-            if not IS_CLOUD:
-                with st.form("contact_form", clear_on_submit=True):
-                    st.subheader("הוספת איש קשר ידנית")
-                    c1, c2 = st.columns(2); first_name = c1.text_input("שם פרטי"); last_name = c2.text_input("שם משפחה"); company = c1.text_input("שם חברה"); role = c2.text_input("תפקיד"); phone = c1.text_input("טלפון"); email = c2.text_input("כתובת מייל")
-                    if st.form_submit_button("שמור איש קשר"):
-                        if not first_name or not last_name: st.error("שם פרטי ושם משפחה הם שדות חובה.")
-                        else:
-                            session = Session();
-                            try:
-                                new_contact = Contact(first_name=first_name, last_name=last_name, company=company, role=role, phone=phone, email=email)
-                                session.add(new_contact); session.commit(); st.success(f"איש הקשר '{first_name} {last_name}' נשמר!"); st.cache_data.clear()
-                            finally: session.close()
-                st.markdown("---")
-                st.subheader("רשימת אנשי קשר (ידנית)")
-                contacts_df = get_contacts_df(Session, manual=True)
-                search_term = st.text_input("חפש איש קשר:")
-                if search_term: contacts_df = contacts_df[contacts_df.apply(lambda row: search_term.lower() in ' '.join(row.astype(str)).lower(), axis=1)]
-                if not contacts_df.empty:
-                    if 'original_contacts' not in st.session_state or not st.session_state.original_contacts.equals(contacts_df):
-                        st.session_state.original_contacts = contacts_df.copy()
-                    edited_df = st.data_editor(contacts_df, key="contacts_editor", use_container_width=True, hide_index=True, disabled=["מזהה"])
-                    st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(edited_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
-                    if not st.session_state.original_contacts.equals(edited_df):
-                        session = Session()
+if Session_factory:
+    PAGES = {"📊 דוחות ראשיים": "main_reports", "🏠 איתור נכסים בישראל": "asset_search", "👥 אנשי קשר": "contacts_page"}; st.sidebar.title("ניווט"); selection = st.sidebar.radio("בחר עמוד:", list(PAGES.keys())); page = PAGES[selection]
+    
+    if page == "main_reports":
+        st.header("דוחות מסכמים"); st.info("הדוחות להלן מציגים ממצאים שחולצו אוטומטית מכלל המסמכים.")
+        reports = get_predefined_reports()
+        for report_name, df in reports.items():
+            with st.expander(f"**{report_name}** ({len(df)} ממצאים)"):
+                if not df.empty:
+                    display_df = df.rename(columns={'company_name': 'שם חברה', 'finding_text': 'ממצא', 'filename': 'שם קובץ'}); st.dataframe(display_df, use_container_width=True); st.download_button(label=f"📥 ייצא את רשימת '{report_name}' לאקסל", data=to_excel(display_df), file_name=f"{report_name.replace('\"', '')}.xlsx", key=f"export_{report_name}")
+                else: st.write("לא נמצאו ממצאים בקטגוריה זו.")
+    
+    elif page == "asset_search":
+        st.header("איתור נכסים בישראל")
+        tab1, tab2 = st.tabs(["💬 שיחה עם AI", "🔍 חיפוש פשוט"])
+        with tab1:
+            st.info("שאל שאלה בשפה חופשית על נכסים בישראל. ה-AI יחפש בממצאים הרלוונטיים ויסכם את התשובה.")
+            if "asset_messages" not in st.session_state: st.session_state.asset_messages = []
+            for msg in st.session_state.asset_messages:
+                with st.chat_message(msg["role"]): st.markdown(msg["content"])
+            if prompt := st.chat_input("לדוגמה: אילו חברות מחזיקות קרקעות בחיפה?"):
+                st.session_state.asset_messages.append({"role": "user", "content": prompt}); st.rerun()
+            if st.session_state.asset_messages and st.session_state.asset_messages[-1]["role"] == "user":
+                with st.chat_message("assistant"):
+                    with st.spinner("חושב..."):
+                        response = ai_asset_search(st.session_state.asset_messages[-1]["content"])
+                        st.markdown(response); st.session_state.asset_messages.append({"role": "assistant", "content": response}); st.rerun()
+        with tab2:
+            st.info("הזן מונח (עיר, רחוב, סוג נכס) לחיפוש מהיר בכל הטקסטים של הדוחות.")
+            keyword = st.text_input("הזן מונח לחיפוש:", key="keyword_search")
+            if st.button("חפש", key="search_button"):
+                if keyword:
+                    with st.spinner("מחפש..."):
+                        session = Session_factory(); results = session.query(Document.company_name, Document.filename, Document.full_text).filter(Document.full_text.like(f'%{keyword}%')).limit(50).all(); session.close()
+                        if results:
+                            st.success(f"נמצאו {len(results)} מסמכים המכילים את המונח '{keyword}':")
+                            for doc in results:
+                                try:
+                                    safe_keyword = re.escape(keyword); match = re.search(safe_keyword, doc.full_text, re.IGNORECASE)
+                                    if match:
+                                        snippet = doc.full_text[max(0, match.start() - 80):match.end() + 80]
+                                        highlighted_snippet = re.sub(f'({safe_keyword})', r'**\1**', snippet, flags=re.IGNORECASE)
+                                        st.info(f"**חברה:** {doc.company_name} | **קובץ:** {doc.filename}"); st.markdown(f'<div dir="rtl">...{highlighted_snippet}...</div>', unsafe_allow_html=True)
+                                except Exception as e: st.warning(f"לא ניתן היה להציג קטע מתוך '{doc.filename}': {e}")
+                        else: st.warning(f"המונח '{keyword}' לא נמצא באף מסמך.")
+                else: st.warning("אנא הזן מונח לחיפוש.")
+    
+    elif page == "contacts_page":
+        st.header("ניהול אנשי קשר")
+        st.subheader("אנשי קשר שחולצו אוטומטית מהדוחות")
+        auto_contacts_df = get_contacts_df(manual=False)
+        if not auto_contacts_df.empty:
+            st.dataframe(auto_contacts_df, use_container_width=True)
+            st.download_button(label="📥 ייצא רשימה אוטומטית לאקסל", data=to_excel(auto_contacts_df), file_name="אנשי_קשר_אוטומטי.xlsx")
+        else: st.info("לא חולצו אנשי קשר באופן אוטומטי מהמסמכים.")
+        st.markdown("---")
+        if not IS_CLOUD:
+            with st.form("contact_form", clear_on_submit=True):
+                st.subheader("הוספת איש קשר ידנית")
+                c1, c2 = st.columns(2); first_name = c1.text_input("שם פרטי"); last_name = c2.text_input("שם משפחה"); company = c1.text_input("שם חברה"); role = c2.text_input("תפקיד"); phone = c1.text_input("טלפון"); email = c2.text_input("כתובת מייל")
+                if st.form_submit_button("שמור איש קשר"):
+                    if not first_name or not last_name: st.error("שם פרטי ושם משפחה הם שדות חובה.")
+                    else:
+                        session = Session_factory();
                         try:
-                            changed_rows = pd.concat([st.session_state.original_contacts, edited_df]).drop_duplicates(keep=False)
-                            for _, row in changed_rows.iterrows():
-                                if row['מזהה'] in edited_df['מזהה'].values:
-                                    contact_to_update = session.query(Contact).filter_by(id=row['מזהה']).one()
-                                    contact_to_update.first_name, contact_to_update.last_name, contact_to_update.company, contact_to_update.role, contact_to_update.phone, contact_to_update.email = row['שם פרטי'], row['שם משפחה'], row['חברה'], row['תפקיד'], row['טלפון'], row['מייל']
-                            session.commit(); st.toast("השינויים נשמרו!"); st.cache_data.clear(); st.rerun()
-                        except Exception as e:
-                            session.rollback(); st.error(f"שגיאה בעדכון: {e}")
+                            new_contact = Contact(first_name=first_name, last_name=last_name, company=company, role=role, phone=phone, email=email)
+                            session.add(new_contact); session.commit(); st.success(f"איש הקשר '{first_name} {last_name}' נשמר!"); st.cache_data.clear()
                         finally: session.close()
-                else: st.info("לא נמצאו אנשי קשר." if search_term else "עדיין לא נוספו אנשי קשר.")
-            else:
-                st.info("ניהול אנשי קשר (הוספה ועריכה) אפשרי רק בגרסה המקומית של האפליקציה.")
-                st.subheader("רשימת אנשי קשר (ידנית)")
-                manual_contacts_df = get_contacts_df(Session, manual=True)
-                if not manual_contacts_df.empty:
-                    st.dataframe(manual_contacts_df.drop(columns=['מזהה']), use_container_width=True)
-                    st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(manual_contacts_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
-                else: st.info("לא הוספו אנשי קשר באופן ידני.")
+            st.markdown("---")
+            st.subheader("רשימת אנשי קשר (ידנית)")
+            contacts_df = get_contacts_df(manual=True)
+            search_term = st.text_input("חפש איש קשר:")
+            if search_term: contacts_df = contacts_df[contacts_df.apply(lambda row: search_term.lower() in ' '.join(row.astype(str)).lower(), axis=1)]
+            if not contacts_df.empty:
+                edited_df = st.data_editor(contacts_df, key="contacts_editor", use_container_width=True, hide_index=True, disabled=["מזהה"])
+                st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(edited_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
+                if not contacts_df.equals(edited_df):
+                    session = Session_factory()
+                    try:
+                        changed_rows = pd.concat([contacts_df, edited_df]).drop_duplicates(keep=False)
+                        for _, row in changed_rows.iterrows():
+                            if row['מזהה'] in edited_df['מזהה'].values:
+                                contact_to_update = session.query(Contact).filter_by(id=row['מזהה']).one()
+                                contact_to_update.first_name, contact_to_update.last_name, contact_to_update.company, contact_to_update.role, contact_to_update.phone, contact_to_update.email = row['שם פרטי'], row['שם משפחה'], row['חברה'], row['תפקיד'], row['טלפון'], row['מייל']
+                        session.commit(); st.toast("השינויים נשמרו!"); st.cache_data.clear(); st.rerun()
+                    except Exception as e:
+                        session.rollback(); st.error(f"שגיאה בעדכון: {e}")
+                    finally: session.close()
+            else: st.info("לא נמצאו אנשי קשר." if search_term else "עדיין לא נוספו אנשי קשר.")
+        else:
+            st.info("ניהול אנשי קשר (הוספה ועריכה) אפשרי רק בגרסה המקומית של האפליקציה.")
+            st.subheader("רשימת אנשי קשר (ידנית)")
+            manual_contacts_df = get_contacts_df(manual=True)
+            if not manual_contacts_df.empty:
+                st.dataframe(manual_contacts_df.drop(columns=['מזהה']), use_container_width=True)
+                st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(manual_contacts_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
+            else: st.info("לא הוספו אנשי קשר באופן ידני.")
+else:
+    st.warning("האפליקציה ממתינה לחיבור לבסיס הנתונים...")
