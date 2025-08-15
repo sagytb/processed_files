@@ -18,7 +18,6 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 
 # --- Setup for Cloud and Local ---
-# Load .env file for local development
 load_dotenv()
 
 # Smartly detect the environment and load secrets accordingly
@@ -71,9 +70,9 @@ def setup_database():
     class Finding(Base):
         __tablename__ = 'findings'; id = Column(Integer, primary_key=True); document_id = Column(Integer, ForeignKey('documents.id')); category = Column(String); finding_text = Column(Text); document = relationship("Document", back_populates="findings")
     class Contact(Base):
-        __tablename__ = 'contacts'; id = Column(Integer, primary_key=True); first_name = Column(String); last_name = Column(String); company = Column(String); role = Column(String); phone = Column(String); email = Column(String)
+        __tablename__ = 'contacts'; id = Column(Integer, primary_key=True, autoincrement=True); first_name = Column(String); last_name = Column(String); company = Column(String); role = Column(String); phone = Column(String); email = Column(String)
     class AutoContact(Base):
-        __tablename__ = 'auto_contacts'; id = Column(Integer, primary_key=True); document_id = Column(Integer, ForeignKey('documents.id')); name = Column(String); role = Column(String); email = Column(String); phone = Column(String); document = relationship("Document", back_populates="auto_contacts")
+        __tablename__ = 'auto_contacts'; id = Column(Integer, primary_key=True, autoincrement=True); document_id = Column(Integer, ForeignKey('documents.id')); name = Column(String); role = Column(String); email = Column(String); phone = Column(String); document = relationship("Document", back_populates="auto_contacts")
     
     Session = sessionmaker(bind=engine)
     return Session
@@ -216,7 +215,6 @@ elif page == "contacts_page":
     st.markdown("---")
     
     if not IS_CLOUD:
-        # LOCAL: Full functionality
         with st.form("contact_form", clear_on_submit=True):
             st.subheader("הוספת איש קשר ידנית")
             c1, c2 = st.columns(2); first_name = c1.text_input("שם פרטי"); last_name = c2.text_input("שם משפחה"); company = c1.text_input("שם חברה"); role = c2.text_input("תפקיד"); phone = c1.text_input("טלפון"); email = c2.text_input("כתובת מייל")
@@ -252,7 +250,6 @@ elif page == "contacts_page":
                 finally: session.close()
         else: st.info("לא נמצאו אנשי קשר." if search_term else "עדיין לא נוספו אנשי קשר.")
     else:
-        # CLOUD: Read-only mode
         st.info("ניהול אנשי קשר (הוספה ועריכה) אפשרי רק בגרסה המקומית של האפליקציה.")
         st.subheader("רשימת אנשי קשר (ידנית)")
         manual_contacts_df = get_contacts_df(manual=True)
