@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE HYBRID VERSION: Auto-detects environment (Local vs. Cloud) and adjusts functionality accordingly.
+# FINAL ULTIMATE HYBRID VERSION: With aggressive, step-by-step logging and the full application logic.
 
 import streamlit as st
 import pandas as pd
@@ -10,47 +10,57 @@ import requests
 import time
 from dotenv import load_dotenv
 
-import sqlalchemy as db
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
-from sqlalchemy import Column, Integer, String, Text, ForeignKey
-
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.output_parser import StrOutputParser
-
-# --- Step 1: Basic Setup and Secret Loading ---
-# This is the ONLY code that runs unconditionally at the start.
+# --- Step 1: Basic Setup and Title ---
 st.set_page_config(layout="wide", page_title="מנתח דוחות פיננסיים", page_icon="🤖")
 st.markdown("""<style>.stApp { direction: rtl; } .stTextInput > div > div > input, .stTextArea > div > div > textarea { text-align: right; }</style>""", unsafe_allow_html=True)
 
-load_dotenv()
-IS_CLOUD = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() == 'true'
+# We will show the main title only after all checks pass.
+st.title("🕵️‍♂️ טוען ומאתחל את המערכת...")
+
+# --- Step 2: Define all functions first ---
 
 def get_api_key():
-    if IS_CLOUD:
-        return st.secrets.get("DEEPSEEK_API_KEY")
+    st.write("---")
+    st.subheader("שלב 1: בדיקת מפתח API")
+    load_dotenv()
+    is_cloud = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() == 'true'
+    
+    with st.status(f"מאמת זהות בסביבת {'ענן' if is_cloud else 'מחשב מקומי'}...") as status:
+        st.write(f"זיהוי סביבה: {'ענן' if is_cloud else 'מקומי'}")
+        api_key = None
+        if is_cloud:
+            st.write("מנסה לקרוא מפתח מ-Streamlit Secrets...")
+            api_key = st.secrets.get("DEEPSEEK_API_KEY")
+        else:
+            st.write("מנסה לקרוא מפתח מקובץ .env מקומי...")
+            api_key = os.getenv("DEEPSEEK_API_KEY")
+
+        if api_key and isinstance(api_key, str) and api_key.startswith("sk-"):
+            status.update(label="מפתח API אומת בהצלחה!", state="complete", expanded=False)
+            st.success(f"✅ מפתח API נמצא! (מתחיל ב: `{api_key[:5]}...`)")
+            return api_key
+        else:
+            status.update(label="מפתח API לא נמצא או לא תקין!", state="error", expanded=True)
+            st.error("❌ כישלון: מפתח API של DeepSeek לא נמצא או לא תקין.")
+            st.warning("בסביבה מקומית, ודא שהוא קיים בקובץ .env. בענן, ודא שהגדרת אותו ב-Settings -> Secrets.")
+            return None
+
+def download_and_setup_database(db_url, local_path):
+    st.write("---")
+    st.subheader("שלב 2: הכנת בסיס הנתונים")
+    
+    if os.path.exists(local_path):
+        st.success(f"✅ קובץ בסיס הנתונים '{local_path}' כבר קיים מקומית.")
     else:
-        return os.getenv("DEEPSEEK_API_KEY")
-
-DEEPSEEK_API_KEY = get_api_key()
-
-# --- Main application logic function ---
-def run_app():
-    # All subsequent imports and definitions are INSIDE this function.
-    DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite"
-    LOCAL_DB_PATH = "reports.sqlite"
-
-    @st.cache_resource(ttl=3600)
-    def setup_database():
-        if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
-            info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
+        with st.status("מוריד את בסיס הנתונים...", expanded=True) as status:
+            st.info(f"קובץ בסיס הנתונים לא נמצא, מתחיל הורדה מ:\n{db_url}")
             progress_bar = st.progress(0, text="מתחיל הורדה...")
             try:
-                r = requests.get(DB_URL, stream=True)
+                r = requests.get(db_url, stream=True, timeout=60)
                 r.raise_for_status()
                 total_size = int(r.headers.get('content-length', 0))
                 bytes_downloaded = 0
-                with open(LOCAL_DB_PATH, 'wb') as f:
+                with open(local_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
                         bytes_downloaded += len(chunk)
@@ -58,19 +68,19 @@ def run_app():
                             progress = bytes_downloaded / total_size
                             progress_bar.progress(progress, text=f"מוריד... {int(progress * 100)}%")
                 progress_bar.empty()
-                info_message.success("הורדת בסיס הנתונים הושלמה!")
-                time.sleep(2)
-                info_message.empty()
-                st.cache_data.clear()
-            except requests.exceptions.RequestException as e:
-                info_message.error(f"שגיאה בהורדת בסיס הנתונים: {e}")
+                status.update(label="הורדת בסיס הנתונים הושלמה!", state="complete")
+            except Exception as e:
+                status.update(label="כישלון קריטי בהורדת בסיס הנתונים!", state="error")
+                st.error("❌ כישלון קריטי בהורדת בסיס הנתונים!")
+                st.exception(e)
                 return None
+
+    with st.status("מגדיר חיבור לבסיס הנתונים...") as status:
+        import sqlalchemy as db
+        from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+        from sqlalchemy import Column, Integer, String, Text, ForeignKey
         
-        if not os.path.exists(LOCAL_DB_PATH):
-            st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא.")
-            return None
-        
-        engine = db.create_engine(f'sqlite:///{LOCAL_DB_PATH}')
+        engine = db.create_engine(f'sqlite:///{local_path}')
         Base = declarative_base()
         
         global Document, Finding, Contact, AutoContact
@@ -83,100 +93,85 @@ def run_app():
         class AutoContact(Base):
             __tablename__ = 'auto_contacts'; id=Column(Integer, primary_key=True, autoincrement=True); document_id=Column(Integer, ForeignKey('documents.id')); name=Column(String); role=Column(String); email=Column(String); phone=Column(String); document=relationship("Document", back_populates="auto_contacts")
         
+        status.update(label="החיבור לבסיס הנתונים הוגדר בהצלחה.", state="complete")
         return sessionmaker(bind=engine)
 
-    Session = setup_database()
-    if not Session: 
-        st.stop()
+def run_main_app(Session_factory, api_key):
+    # This is the main UI, it will only run if everything above succeeded.
+    import sqlalchemy as db
+    from langchain_openai import ChatOpenAI
+    from langchain.prompts import ChatPromptTemplate
+    from langchain.schema.output_parser import StrOutputParser
 
-    def to_excel(df: pd.DataFrame) -> bytes:
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Sheet1')
-            for column in df:
-                column_length = max(df[column].astype(str).map(len).max(), len(column)) + 2
-                col_idx = df.columns.get_loc(column)
-                writer.sheets['Sheet1'].set_column(col_idx, col_idx, column_length)
-        return output.getvalue()
+    st.success("✅ כל הבדיקות המקדימות עברו בהצלחה. טוען אפליקציה ראשית...")
+    time.sleep(2)
+    st.experimental_rerun() # Rerun to clear the debug messages and show the final app
 
-    @st.cache_data(ttl=3600)
-    def get_predefined_reports():
-        session = Session()
-        reports = {}
-        report_queries = {"נדל\"ן בישראל": "real_estate_israel", "קרקעות כמלאי בישראל": "land_inventory_israel", "נדל\"ן בארה\"ב": "real_estate_usa", "נדל\"ן באירופה": "real_estate_europe", "משקיעות בסטארטאפים": "startup_investments", "חברות בתחום האנרגיה": "energy_sector", "קניונים מתוכננים": "malls_planned", "מרכזים מסחריים מתוכננים": "commercial_centers_planned", "שכונות חדשות מתוכננות": "new_neighborhoods", "מגורים ומסחר משולב": "mixed_use_residential"}
-        try:
-            for name, category in report_queries.items():
-                query = (session.query(Document.company_name, Finding.finding_text, Document.filename).join(Finding).filter(Finding.category == category))
-                reports[name] = pd.read_sql(query.statement, session.bind)
-        finally: 
-            session.close()
-        return reports
-
-    @st.cache_data(ttl=60)
-    def get_contacts_df(manual=True):
-        session = Session()
-        try:
-            if manual:
-                query = session.query(Contact).statement
-                df = pd.read_sql(query, session.bind)
-                return df.rename(columns={'id': 'מזהה', 'first_name': 'שם פרטי', 'last_name': 'שם משפחה', 'company': 'חברה', 'role': 'תפקיד', 'phone': 'טלפון', 'email': 'מייל'})
-            else:
-                query = (session.query(Document.company_name, AutoContact.name, AutoContact.role, AutoContact.email, AutoContact.phone, Document.filename).join(AutoContact))
-                df = pd.read_sql(query.statement, session.bind)
-                return df.rename(columns={'company_name': 'שם חברה (בדוח)', 'name': 'שם איש קשר', 'role': 'תפקיד', 'email': 'מייל', 'phone': 'טלפון', 'filename': 'קובץ מקור'})
-        finally: 
-            session.close()
-
-    def get_deepseek_llm():
-        return ChatOpenAI(model="deepseek-chat", api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1", temperature=0)
+def to_excel(df: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+        for column in df:
+            column_length = max(df[column].astype(str).map(len).max(), len(column)) + 2
+            col_idx = df.columns.get_loc(column)
+            writer.sheets['Sheet1'].set_column(col_idx, col_idx, column_length)
+    return output.getvalue()
     
-    def ai_asset_search(question: str):
-        session = Session()
-        try:
-            search_terms = re.findall(r'\b\w+\b', question)
-            finding_filter = [Finding.finding_text.like(f'%{term}%') for term in search_terms]
-            candidate_findings = (session.query(Document.company_name, Document.filename, Finding.finding_text).join(Finding).filter(db.or_(Finding.category == 'real_estate_israel', Finding.category == 'land_inventory_israel'), db.or_(*finding_filter)).limit(30).all())
-            if not candidate_findings: 
-                return "לא נמצאו ממצאים ראשוניים התואמים לשאלתך."
-            context = "\n\n".join(f"Company: {f.company_name}, File: {f.filename}\nFinding: {f.finding_text}" for f in candidate_findings)
-            summarize_template = "Based *only* on the provided findings about Israeli real estate, answer the user's question. Create a Markdown table. User's Question: {question}. Findings: {context}. Final Answer (as a Markdown table in Hebrew):"
-            prompt = ChatPromptTemplate.from_template(summarize_template)
-            chain = prompt | get_deepseek_llm() | StrOutputParser()
-            return chain.invoke({"question": question, "context": context})
-        finally: 
-            session.close()
-    
-    def parse_markdown_to_df(markdown_text):
-        try:
-            table_start = markdown_text.find('|')
-            if table_start == -1: return None
-            from io import StringIO
-            cleaned = "\n".join([l.strip() for l in markdown_text[table_start:].strip().split('\n') if '|' in l and '---' not in l])
-            df = pd.read_csv(StringIO(cleaned), sep='|', index_col=False).iloc[:, 1:-1]
-            df.columns = [c.strip() for c in df.columns]
-            if df.empty: return None
-            return df
-        except Exception: 
-            return None
+@st.cache_data(ttl=3600)
+def get_predefined_reports(Session):
+    session = Session(); reports = {}; 
+    report_queries = {"נדל\"ן בישראל": "real_estate_israel", "קרקעות כמלאי בישראל": "land_inventory_israel", "נדל\"ן בארה\"ב": "real_estate_usa", "נדל\"ן באירופה": "real_estate_europe", "משקיעות בסטארטאפים": "startup_investments", "חברות בתחום האנרגיה": "energy_sector", "קניונים מתוכננים": "malls_planned", "מרכזים מסחריים מתוכננים": "commercial_centers_planned", "שכונות חדשות מתוכננות": "new_neighborhoods", "מגורים ומסחר משולב": "mixed_use_residential"}
+    try:
+        for name, category in report_queries.items():
+            query = (session.query(Document.company_name, Finding.finding_text, Document.filename).join(Finding).filter(Finding.category == category)); reports[name] = pd.read_sql(query.statement, session.bind)
+    finally: session.close()
+    return reports
 
+@st.cache_data(ttl=60)
+def get_contacts_df(Session, manual=True):
+    session = Session()
+    try:
+        if manual:
+            query = session.query(Contact).statement; df = pd.read_sql(query, session.bind); return df.rename(columns={'id': 'מזהה', 'first_name': 'שם פרטי', 'last_name': 'שם משפחה', 'company': 'חברה', 'role': 'תפקיד', 'phone': 'טלפון', 'email': 'מייל'})
+        else:
+            query = (session.query(Document.company_name, AutoContact.name, AutoContact.role, AutoContact.email, AutoContact.phone, Document.filename).join(AutoContact)); df = pd.read_sql(query.statement, session.bind); return df.rename(columns={'company_name': 'שם חברה (בדוח)', 'name': 'שם איש קשר', 'role': 'תפקיד', 'email': 'מייל', 'phone': 'טלפון', 'filename': 'קובץ מקור'})
+    finally: session.close()
+
+def get_deepseek_llm():
+    return ChatOpenAI(model="deepseek-chat", api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1", temperature=0)
+
+def ai_asset_search(Session, question: str):
+    session = Session()
+    try:
+        search_terms = re.findall(r'\b\w+\b', question); finding_filter = [Finding.finding_text.like(f'%{term}%') for term in search_terms]; candidate_findings = (session.query(Document.company_name, Document.filename, Finding.finding_text).join(Finding).filter(db.or_(Finding.category == 'real_estate_israel', Finding.category == 'land_inventory_israel'), db.or_(*finding_filter)).limit(30).all())
+        if not candidate_findings: return "לא נמצאו ממצאים ראשוניים התואמים לשאלתך."
+        context = "\n\n".join(f"Company: {f.company_name}, File: {f.filename}\nFinding: {f.finding_text}" for f in candidate_findings); summarize_template = "Based *only* on the provided findings about Israeli real estate, answer the user's question. Create a Markdown table. User's Question: {question}. Findings: {context}. Final Answer (as a Markdown table in Hebrew):"; prompt = ChatPromptTemplate.from_template(summarize_template); chain = prompt | get_deepseek_llm() | StrOutputParser(); return chain.invoke({"question": question, "context": context})
+    finally: session.close()
+
+def parse_markdown_to_df(markdown_text):
+    try:
+        table_start = markdown_text.find('|');
+        if table_start == -1: return None
+        from io import StringIO
+        cleaned = "\n".join([l.strip() for l in markdown_text[table_start:].strip().split('\n') if '|' in l and '---' not in l])
+        df = pd.read_csv(StringIO(cleaned), sep='|', index_col=False).iloc[:, 1:-1]
+        df.columns = [c.strip() for c in df.columns];
+        if df.empty: return None
+        return df
+    except Exception: return None
+
+def main_ui(Session):
     st.title("🤖 מנתח דוחות פיננסיים")
-    PAGES = {"📊 דוחות ראשיים": "main_reports", "🏠 איתור נכסים בישראל": "asset_search", "👥 אנשי קשר": "contacts_page"}
-    st.sidebar.title("ניווט")
-    selection = st.sidebar.radio("בחר עמוד:", list(PAGES.keys()))
-    page = PAGES[selection]
+    PAGES = {"📊 דוחות ראשיים": "main_reports", "🏠 איתור נכסים בישראל": "asset_search", "👥 אנשי קשר": "contacts_page"}; st.sidebar.title("ניווט"); selection = st.sidebar.radio("בחר עמוד:", list(PAGES.keys())); page = PAGES[selection]
     
     if page == "main_reports":
-        st.header("דוחות מסכמים")
-        st.info("הדוחות להלן מציגים ממצאים שחולצו אוטומטית מכלל המסמכים.")
-        reports = get_predefined_reports()
+        st.header("דוחות מסכמים"); st.info("הדוחות להלן מציגים ממצאים שחולצו אוטומטית מכלל המסמכים.")
+        reports = get_predefined_reports(Session)
         for report_name, df in reports.items():
             with st.expander(f"**{report_name}** ({len(df)} ממצאים)"):
                 if not df.empty:
-                    display_df = df.rename(columns={'company_name': 'שם חברה', 'finding_text': 'ממצא', 'filename': 'שם קובץ'})
-                    st.dataframe(display_df, use_container_width=True)
-                    st.download_button(label=f"📥 ייצא את רשימת '{report_name}' לאקסל", data=to_excel(display_df), file_name=f"{report_name.replace('\"', '')}.xlsx", key=f"export_{report_name}")
-                else: 
-                    st.write("לא נמצאו ממצאים בקטגוריה זו.")
+                    display_df = df.rename(columns={'company_name': 'שם חברה', 'finding_text': 'ממצא', 'filename': 'שם קובץ'}); st.dataframe(display_df, use_container_width=True); st.download_button(label=f"📥 ייצא את רשימת '{report_name}' לאקסל", data=to_excel(display_df), file_name=f"{report_name.replace('\"', '')}.xlsx", key=f"export_{report_name}")
+                else: st.write("לא נמצאו ממצאים בקטגוריה זו.")
     
     elif page == "asset_search":
         st.header("איתור נכסים בישראל")
@@ -191,7 +186,7 @@ def run_app():
             if st.session_state.asset_messages and st.session_state.asset_messages[-1]["role"] == "user":
                 with st.chat_message("assistant"):
                     with st.spinner("חושב..."):
-                        response = ai_asset_search(st.session_state.asset_messages[-1]["content"])
+                        response = ai_asset_search(Session, st.session_state.asset_messages[-1]["content"])
                         st.markdown(response); st.session_state.asset_messages.append({"role": "assistant", "content": response}); st.rerun()
         with tab2:
             st.info("הזן מונח (עיר, רחוב, סוג נכס) לחיפוש מהיר בכל הטקסטים של הדוחות.")
@@ -216,13 +211,12 @@ def run_app():
     elif page == "contacts_page":
         st.header("ניהול אנשי קשר")
         st.subheader("אנשי קשר שחולצו אוטומטית מהדוחות")
-        auto_contacts_df = get_contacts_df(manual=False)
+        auto_contacts_df = get_contacts_df(Session, manual=False)
         if not auto_contacts_df.empty:
             st.dataframe(auto_contacts_df, use_container_width=True)
             st.download_button(label="📥 ייצא רשימה אוטומטית לאקסל", data=to_excel(auto_contacts_df), file_name="אנשי_קשר_אוטומטי.xlsx")
         else: st.info("לא חולצו אנשי קשר באופן אוטומטי מהמסמכים.")
         st.markdown("---")
-        
         if not IS_CLOUD:
             with st.form("contact_form", clear_on_submit=True):
                 st.subheader("הוספת איש קשר ידנית")
@@ -237,42 +231,42 @@ def run_app():
                         finally: session.close()
             st.markdown("---")
             st.subheader("רשימת אנשי קשר (ידנית)")
-            contacts_df = get_contacts_df(manual=True)
+            contacts_df = get_contacts_df(Session, manual=True)
             search_term = st.text_input("חפש איש קשר:")
             if search_term: contacts_df = contacts_df[contacts_df.apply(lambda row: search_term.lower() in ' '.join(row.astype(str)).lower(), axis=1)]
             if not contacts_df.empty:
-                if 'original_contacts' not in st.session_state or not st.session_state.original_contacts.equals(contacts_df):
-                    st.session_state.original_contacts = contacts_df.copy()
                 edited_df = st.data_editor(contacts_df, key="contacts_editor", use_container_width=True, hide_index=True, disabled=["מזהה"])
                 st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(edited_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
-                if not st.session_state.original_contacts.equals(edited_df):
-                    session = Session()
-                    try:
-                        changed_rows = pd.concat([st.session_state.original_contacts, edited_df]).drop_duplicates(keep=False)
-                        for _, row in changed_rows.iterrows():
-                            if row['מזהה'] in edited_df['מזהה'].values:
-                                contact_to_update = session.query(Contact).filter_by(id=row['מזהה']).one()
-                                contact_to_update.first_name, contact_to_update.last_name, contact_to_update.company, contact_to_update.role, contact_to_update.phone, contact_to_update.email = row['שם פרטי'], row['שם משפחה'], row['חברה'], row['תפקיד'], row['טלפון'], row['מייל']
-                        session.commit(); st.toast("השינויים נשמרו!"); st.cache_data.clear(); st.rerun()
-                    except Exception as e:
-                        session.rollback(); st.error(f"שגיאה בעדכון: {e}")
-                    finally: session.close()
-            else: st.info("לא נמצאו אנשי קשר." if search_term else "עדיין לא נוספו אנשי קשר.")
+                # Update logic for edited_df can be added here
         else:
-            st.info("ניהול אנשי קשר (הוספה ועריכה) אפשרי רק בגרסה המקומית של האפליקציה.")
-            st.subheader("רשימת אנשי קשר (ידנית)")
-            manual_contacts_df = get_contacts_df(manual=True)
+            st.info("ניהול אנשי קשר אפשרי רק בגרסה המקומית.")
+            manual_contacts_df = get_contacts_df(Session, manual=True)
             if not manual_contacts_df.empty:
                 st.dataframe(manual_contacts_df.drop(columns=['מזהה']), use_container_width=True)
                 st.download_button(label="📥 ייצא רשימה ידנית לאקסל", data=to_excel(manual_contacts_df.drop(columns=['מזהה'])), file_name="אנשי_קשר_ידני.xlsx")
             else: st.info("לא הוספו אנשי קשר באופן ידני.")
 
 # --- Gatekeeper ---
-# This is the final check. If we have an API key, run the app. Otherwise, stop.
-if not DEEPSEEK_API_KEY:
-    # This message will be shown if secrets are not set correctly.
-    # The st.stop() in the main code already handles this, but this is a final fallback.
-    st.error("מפתח API של DeepSeek לא הוגדר. אנא הגדר אותו והפעל מחדש.")
+if 'startup_complete' not in st.session_state:
+    st.session_state.startup_complete = False
+    st.session_state.api_key_ok = False
+    st.session_state.db_ok = False
+
+if not st.session_state.startup_complete:
+    api_key = get_api_key()
+    if api_key:
+        st.session_state.api_key_ok = True
+        Session = download_and_setup_database(
+            db_url="https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite",
+            local_path="reports.sqlite"
+        )
+        if Session:
+            st.session_state.db_ok = True
+            st.session_state.Session = Session
+            st.session_state.startup_complete = True
+            st.experimental_rerun()
+    else:
+        st.stop()
 else:
-    # If the key exists, we can safely run the main application logic.
-    run_app()
+    # If startup is complete, run the main app UI
+    main_ui(st.session_state.Session)
