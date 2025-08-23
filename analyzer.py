@@ -26,7 +26,7 @@ load_dotenv()
 IS_CLOUD = os.environ.get('STREAMLIT_SERVER_RUNNING_IN_CLOUD', 'false').lower() == 'true'
 DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY") if IS_CLOUD else os.getenv("DEEPSEEK_API_KEY")
 
-DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite"
+DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite?download=true"
 LOCAL_DB_PATH = "reports.sqlite"
 
 # --- Database Schema (Defined Globally) ---
