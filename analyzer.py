@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE & ROBUST HYBRID VERSION: Implementing community fixes for robust DB downloading and secret handling.
+# FINAL ROBUST VERSION: Using the existence of the .env file as the definitive trigger for local vs. cloud mode.
 
 import streamlit as st
 import pandas as pd
@@ -9,7 +9,7 @@ from io import BytesIO
 import requests
 import time
 from dotenv import load_dotenv
-import tempfile  # <-- הוספת הייבוא הנדרש
+import tempfile
 
 import sqlalchemy as db
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
@@ -24,21 +24,32 @@ st.set_page_config(layout="wide", page_title="מנתח דוחות פיננסיי
 st.markdown("""<style>.stApp { direction: rtl; }</style>""", unsafe_allow_html=True)
 st.title("🤖 מנתח דוחות פיננסיים")
 
-load_dotenv()
+# --- Definitive Environment and Path Configuration ---
 
-# --- א. עדכון מסלול DB ומפתח API (כפי שביקשת) ---
+# Load environment variables from .env file. load_dotenv() returns True if it found and loaded the file.
+# This is our definitive switch between local and cloud environments.
+IS_LOCAL_ENV = load_dotenv()
+
+DEEPSEEK_API_KEY = None
+LOCAL_DB_PATH = None
+
+if IS_LOCAL_ENV:
+    # We are running LOCALLY because a .env file was found.
+    IS_CLOUD = False
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    # Locally, use the DB file in the main project directory.
+    LOCAL_DB_PATH = "reports.sqlite"
+    st.sidebar.caption("מצב ריצה: מקומי 💻")
+else:
+    # We are running in the CLOUD because no .env file was found.
+    IS_CLOUD = True
+    DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY")
+    # In the cloud, we MUST use a temporary directory for the download.
+    LOCAL_DB_PATH = os.path.join(tempfile.gettempdir(), "reports.sqlite")
+    st.sidebar.caption("מצב ריצה: ענן ☁️")
+
 DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite"
-LOCAL_DB_PATH = os.path.join(tempfile.gettempdir(), "reports.sqlite")
 
-# קבלת מפתח API חזקה שעובדת גם בענן וגם מקומית
-DEEPSEEK_API_KEY = (
-    st.secrets.get("DEEPSEEK_API_KEY")
-    if "DEEPSEEK_API_KEY" in st.secrets
-    else os.getenv("DEEPSEEK_API_KEY")
-)
-
-# הגדרת IS_CLOUD עדיין נחוצה כדי לשלוט על תכונות העריכה בממשק המשתמש
-IS_CLOUD = "DEEPSEEK_API_KEY" in st.secrets
 
 # --- Database Schema (Defined Globally) ---
 Base = declarative_base()
@@ -51,11 +62,11 @@ class Contact(Base):
 class AutoContact(Base):
     __tablename__ = 'auto_contacts'; id=Column(Integer, primary_key=True, autoincrement=True); document_id=Column(Integer, ForeignKey('documents.id')); name=Column(String); role=Column(String); email=Column(String); phone=Column(String); document=relationship("Document", back_populates="auto_contacts")
 
-# --- ב. פונקציית חיבור למסד הנתונים (כפי שביקשת) ---
+# --- Database Connection Function ---
 @st.cache_resource
 def get_db_session_factory():
-    # אם הקובץ לא קיים, ננסה תמיד להוריד, ללא תלות בסביבה
-    if not os.path.exists(LOCAL_DB_PATH):
+    # Only attempt to download if running in the cloud AND the file doesn't exist yet.
+    if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
         info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
         progress_bar = st.progress(0, text="מתחיל הורדה...")
         try:
@@ -75,14 +86,16 @@ def get_db_session_factory():
         except requests.exceptions.RequestException as e:
             progress_bar.empty(); info_message.empty(); st.error(f"שגיאה בהורדת בסיס הנתונים: {e}"); return None
 
+    # If the file doesn't exist (locally or after a failed download), show an error.
     if not os.path.exists(LOCAL_DB_PATH):
-        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא לאחר ניסיון הורדה."); return None
+        st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ את סקריפט העיבוד 'run_conversion.bat' תחילה.")
+        return None
 
     engine = db.create_engine(f"sqlite:///{LOCAL_DB_PATH}")
-    Base.metadata.create_all(engine) # בטוח להשאיר, יוצר טבלאות אם לא קיימות
+    Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
 
-# --- Querying Functions (ללא שינוי) ---
+# --- Querying Functions (No changes needed below this line) ---
 def to_excel(df: pd.DataFrame) -> bytes:
     output = BytesIO();
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -148,17 +161,23 @@ def get_documents_for_editing():
         query = session.query(Document.id, Document.filename, Document.company_name).statement; df = pd.read_sql(query, session.bind)
         return df.rename(columns={'id': 'מזהה', 'filename': 'שם קובץ', 'company_name': 'שם חברה (ניתן לעריכה)'})
     finally: session.close()
+
 def get_deepseek_llm():
+    if not DEEPSEEK_API_KEY:
+        return None
     return ChatOpenAI(model="deepseek-chat", api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com/v1", temperature=0)
 
 def ai_asset_search(question: str, selected_years: list):
+    llm = get_deepseek_llm()
+    if not llm:
+        return "שגיאה: מפתח ה-API של המודל אינו מוגדר."
     Session = get_db_session_factory()
     if not Session: return "שגיאה: לא ניתן להתחבר לבסיס הנתונים."
     session = Session()
     try:
         search_terms = re.findall(r'\b\w+\b', question); finding_filter = [Finding.finding_text.like(f'%{term}%') for term in search_terms]; candidate_findings = (session.query(Document.company_name, Document.filename, Finding.finding_text).join(Finding).filter(db.or_(Finding.category == 'real_estate_israel', Finding.category == 'land_inventory_israel'), Document.report_year.in_(selected_years), db.or_(*finding_filter)).limit(30).all())
         if not candidate_findings: return "לא נמצאו ממצאים ראשוניים התואמים לשאלתך בשנים שנבחרו."
-        context = "\n\n".join(f"Company: {f.company_name}, File: {f.filename}\nFinding: {f.finding_text}" for f in candidate_findings); summarize_template = "Based *only* on the provided findings about Israeli real estate, answer the user's question. Create a Markdown table. User's Question: {question}. Findings: {context}. Final Answer (as a Markdown table in Hebrew):"; prompt = ChatPromptTemplate.from_template(summarize_template); chain = prompt | get_deepseek_llm() | StrOutputParser(); return chain.invoke({"question": question, "context": context})
+        context = "\n\n".join(f"Company: {f.company_name}, File: {f.filename}\nFinding: {f.finding_text}" for f in candidate_findings); summarize_template = "Based *only* on the provided findings about Israeli real estate, answer the user's question. Create a Markdown table. User's Question: {question}. Findings: {context}. Final Answer (as a Markdown table in Hebrew):"; prompt = ChatPromptTemplate.from_template(summarize_template); chain = prompt | llm | StrOutputParser(); return chain.invoke({"question": question, "context": context})
     finally: session.close()
 
 def parse_markdown_to_df(markdown_text):
@@ -175,7 +194,6 @@ def parse_markdown_to_df(markdown_text):
 
 # --- Main App Logic ---
 def main():
-    # --- ג. עצירת האפליקציה אם אין מפתח (כפי שביקשת) ---
     if not DEEPSEEK_API_KEY:
         st.error("מפתח API של DeepSeek לא הוגדר. יש להגדיר אותו ב-Secrets בענן או בקובץ .env מקומית."); st.stop()
 
@@ -186,12 +204,13 @@ def main():
     if available_years:
         selected_years = st.sidebar.multiselect("בחר שנות דוח להצגה:", options=available_years, default=available_years)
         if not selected_years: st.sidebar.warning("יש לבחור לפחות שנת דוח אחת."); st.stop()
-    else: selected_years = []
+    else: 
+        st.warning("לא נמצאו נתונים בבסיס הנתונים. ייתכן שיש צורך להריץ את תהליך העיבוד.")
+        selected_years = []
     
     PAGES = {"📊 דוחות ראשיים": "main_reports", "✨ מה חדש?": "whats_new", "🏠 איתור נכסים בישראל": "asset_search", "👥 אנשי קשר": "contacts_page", "📝 ניהול ועריכת נתונים": "data_management"}
     st.sidebar.title("ניווט"); selection = st.sidebar.radio("בחר עמוד:", list(PAGES.keys())); page = PAGES[selection]
     
-    # ... (כל שאר הלוגיקה של העמודים נשארת זהה לחלוטין)...
     if page == "main_reports":
         st.header(f"דוחות מסכמים עבור השנים: {', '.join(map(str, sorted(selected_years)))}")
         st.info("הדוחות להלן מציגים ממצאים שחולצו אוטומטית מכלל המסמכים.")
@@ -306,7 +325,8 @@ def main():
 
     elif page == "data_management":
         st.header("ניהול ועריכת נתונים")
-        if IS_CLOUD: st.warning("עריכת נתונים אפשרית רק בגרסה המקומית של האפליקציה.")
+        if IS_CLOUD:
+            st.warning("עריכת נתונים אפשרית רק בגרסה המקומית של האפליקציה.")
         else:
             st.subheader("עריכת שמות חברות")
             st.info("כאן ניתן לתקן את שמות החברות שזוהו אוטומטית. לחץ על תא בטבלה, הקלד את השם החדש ולחץ Enter. השינוי יישמר אוטומטית.")
