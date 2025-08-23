@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE & ROBUST VERSION: Corrected the UnhashableParamError by creating DB sessions inside cached functions.
+# FINAL COMPLETE HYBRID VERSION: Corrected the UnhashableParamError by creating DB sessions inside cached functions.
 
 import streamlit as st
 import pandas as pd
@@ -27,9 +27,7 @@ DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sq
 LOCAL_DB_PATH = "reports.sqlite"
 
 # --- Database Schema (Defined Globally) ---
-engine = db.create_engine(f'sqlite:///{LOCAL_DB_PATH}')
 Base = declarative_base()
-
 class Document(Base):
     __tablename__ = 'documents'
     id = Column(Integer, primary_key=True)
@@ -70,7 +68,7 @@ class AutoContact(Base):
     document = relationship("Document", back_populates="auto_contacts")
 
 # --- Database Setup & Download Function ---
-@st.cache_resource(ttl=3600)
+@st.cache_resource
 def get_db_session_factory():
     if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
         info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
@@ -91,8 +89,8 @@ def get_db_session_factory():
     if not os.path.exists(LOCAL_DB_PATH):
         st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא. אנא הרץ 'process_files.py'."); return None
 
-    # This part creates the DB connection and schema, it's safe to cache.
-    Base.metadata.create_all(engine) # Ensure tables are created
+    engine = db.create_engine(f'sqlite:///{LOCAL_DB_PATH}')
+    Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
 
 # --- Querying Functions ---
