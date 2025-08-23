@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE HYBRID VERSION: Corrected the UnhashableParamError by creating DB sessions inside cached functions.
+# FINAL COMPLETE & ROBUST HYBRID VERSION: Corrected UnhashableParamError, scope issues, and all other identified bugs.
 
 import streamlit as st
 import pandas as pd
@@ -26,12 +26,12 @@ DEEPSEEK_API_KEY = st.secrets.get("DEEPSEEK_API_KEY") if IS_CLOUD else os.getenv
 DB_URL = "https://huggingface.co/datasets/sagytb/reports/resolve/main/reports.sqlite"
 LOCAL_DB_PATH = "reports.sqlite"
 
-# --- Database Schema (Defined Globally) ---
+# --- Database Schema (Defined Globally to be accessible by all functions) ---
 Base = declarative_base()
 class Document(Base):
     __tablename__ = 'documents'
-    id = Column(Integer, primary_key=True)
-    filename = Column(String)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    filename = Column(String, unique=True, nullable=False)
     company_name = Column(String)
     report_year = Column(Integer)
     full_text = Column(Text)
@@ -41,10 +41,10 @@ class Document(Base):
 
 class Finding(Base):
     __tablename__ = 'findings'
-    id = Column(Integer, primary_key=True)
-    document_id = Column(Integer, ForeignKey('documents.id'))
-    category = Column(String)
-    finding_text = Column(Text)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
+    category = Column(String, nullable=False)
+    finding_text = Column(Text, nullable=False)
     document = relationship("Document", back_populates="findings")
 
 class Contact(Base):
@@ -60,7 +60,7 @@ class Contact(Base):
 class AutoContact(Base):
     __tablename__ = 'auto_contacts'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    document_id = Column(Integer, ForeignKey('documents.id'))
+    document_id = Column(Integer, ForeignKey('documents.id'), nullable=False)
     name = Column(String)
     role = Column(String)
     email = Column(String)
@@ -70,8 +70,12 @@ class AutoContact(Base):
 # --- Database Setup & Download Function ---
 @st.cache_resource
 def get_db_session_factory():
+    """
+    Downloads DB if needed and returns a SESSION FACTORY (not a session object).
+    This factory is cacheable and can be used to create new sessions.
+    """
     if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
-        info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
+        info_message = st.info("קובץ בסיס הנתונים לא נמצא, מתחיל הורדה מ-Hugging Face... ☁️")
         progress_bar = st.progress(0, text="מתחיל הורדה...")
         try:
             r = requests.get(DB_URL, stream=True); r.raise_for_status()
