@@ -1,5 +1,5 @@
 # process_files.py
-# FINAL COMPLETE & ROBUST VERSION: Full document analysis via internal batching to ensure 100% coverage.
+# FINAL COMPLETE & ROBUST VERSION: Asks the user for the report year before processing.
 
 import fitz
 import os
@@ -29,12 +29,9 @@ if os.path.exists(TESSERACT_CMD_PATH):
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD_PATH
 else:
     print("WARNING: Tesseract executable not found at the default path. OCR will fail.")
-    print(f"Please install Tesseract or update TESSERACT_CMD_PATH in {__file__}")
 
 # --- Logging Setup ---
-# Console will show INFO level messages.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
-# A separate file handler for detailed ERROR logs with tracebacks.
 error_log_handler = logging.FileHandler("processing_errors.log", mode='w', encoding='utf-8')
 error_log_handler.setLevel(logging.ERROR)
 error_log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - FILE: %(name)s - MESSAGE: %(message)s\n%(exc_info)s\n' + '-'*80))
@@ -43,8 +40,7 @@ logging.getLogger('').addHandler(error_log_handler)
 # --- Setup and Constants ---
 load_dotenv(); DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DB_FILE = "reports.sqlite"; MANIFEST_FILE = "processed_files_manifest.json"
-# BATCH SIZE FOR INTERNAL DOCUMENT PROCESSING
-FINDINGS_BATCH_SIZE = 15 # Process 15 chunks at a time per document
+FINDINGS_BATCH_SIZE = 15
 
 # --- Database Schema ---
 engine = db.create_engine(f'sqlite:///{DB_FILE}')
@@ -55,6 +51,7 @@ class Document(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     filename = Column(String, unique=True, nullable=False)
     company_name = Column(String)
+    report_year = Column(Integer)
     full_text = Column(Text)
     language = Column(String)
     findings = relationship("Finding", back_populates="document", cascade="all, delete-orphan")
@@ -200,7 +197,7 @@ def extract_findings_from_text(full_text: str) -> dict:
 
     return aggregated_findings
 
-def run_processing_pipeline(folder_path_str: str):
+def run_processing_pipeline(folder_path_str: str, report_year: int):
     if not DEEPSEEK_API_KEY: 
         logging.error("מפתח API של DeepSeek לא נמצא בקובץ .env. התהליך נעצר.")
         return
@@ -209,14 +206,14 @@ def run_processing_pipeline(folder_path_str: str):
         logging.error(f"הנתיב שסופק אינו תיקייה תקינה: '{folder_path_str}'. התהליך נעצר.")
         return
 
-    logging.info("--- מתחיל תהליך עיבוד PDF מתקדם ---")
+    logging.info(f"--- מתחיל עיבוד PDF עבור שנת {report_year} ---")
     
     all_pdf_paths = list(root_path.rglob('*.pdf'))
     manifest = load_manifest()
     files_to_process = [p for p in all_pdf_paths if get_file_identifier(p) not in manifest or manifest.get(get_file_identifier(p), {}).get('status') == 'failed']
     
     if not files_to_process: 
-        logging.info("✅ כל הקבצים כבר מעודכנים. אין קבצים חדשים לעיבוד.")
+        logging.info("✅ כל הקבצים בתיקייה זו כבר מעודכנים. אין קבצים חדשים לעיבוד.")
         return
 
     logging.info(f"⏳ נמצאו {len(files_to_process)} קבצים הדורשים עיבוד (חדשים או שנכשלו בעבר).")
@@ -232,12 +229,12 @@ def run_processing_pipeline(folder_path_str: str):
             full_text = "".join(page.get_text() for page in doc)
             if len(full_text.strip()) < 200 * doc.page_count:
                 logging.warning(f"  - כמות טקסט נמוכה. מנסה לבצע OCR...")
-                full_text = ""
+                ocr_text_parts = []
                 for page_num, page in enumerate(doc):
-                    logging.info(f"    - מבצע OCR על עמוד {page_num + 1}/{doc.page_count}...")
                     pix = page.get_pixmap(dpi=300)
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    full_text += pytesseract.image_to_string(img, lang='heb+eng')
+                    ocr_text_parts.append(pytesseract.image_to_string(img, lang='heb+eng'))
+                full_text = "\n".join(ocr_text_parts)
             doc.close()
             if not full_text.strip(): 
                 raise ValueError("הקובץ ריק או אינו מכיל טקסט שניתן לחלץ.")
@@ -266,6 +263,7 @@ def run_processing_pipeline(folder_path_str: str):
                 session.add(doc_to_update)
 
             doc_to_update.company_name = company_name
+            doc_to_update.report_year = report_year
             doc_to_update.language = lang
             doc_to_update.full_text = full_text
             
@@ -316,6 +314,18 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) != 2:
         print("שימוש: python process_files.py \"<הנתיב המלא לתיקיית ה-PDF>\"")
-        print("דוגמה: python process_files.py \"C:\\Users\\MyUser\\Documents\\Financial Reports\"")
     else:
-        run_processing_pipeline(sys.argv[1])
+        folder_path = sys.argv[1]
+        
+        while True:
+            try:
+                year_input = input("אנא הזן את שנת הדוחות עבור הקבצים בתיקייה זו (לדוגמה: 2024): ")
+                report_year = int(year_input)
+                if 2000 < report_year < 2100:
+                    break
+                else:
+                    print("שנה לא תקינה. אנא הזן שנה בין 2000 ל-2100.")
+            except ValueError:
+                print("קלט לא תקין. אנא הזן מספר בלבד.")
+        
+        run_processing_pipeline(folder_path, report_year)
