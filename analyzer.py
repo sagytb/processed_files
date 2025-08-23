@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE & ROBUST HYBRID VERSION: Corrected UnhashableParamError, scope issues, and all other identified bugs.
+# FINAL COMPLETE & ROBUST HYBRID VERSION: Corrected the UnhashableParamError by creating DB sessions inside cached functions.
 
 import streamlit as st
 import pandas as pd
@@ -75,7 +75,7 @@ def get_db_session_factory():
     This factory is cacheable and can be used to create new sessions.
     """
     if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
-        info_message = st.info("קובץ בסיס הנתונים לא נמצא, מתחיל הורדה מ-Hugging Face... ☁️")
+        info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
         progress_bar = st.progress(0, text="מתחיל הורדה...")
         try:
             r = requests.get(DB_URL, stream=True); r.raise_for_status()
