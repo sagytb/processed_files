@@ -10,3 +10,4 @@ pytesseract
 Pillow
 xlsxwriter
 requests
+passlib[bcrypt]
