@@ -1,5 +1,5 @@
 # analyzer.py
-# FINAL COMPLETE & CORRECTED VERSION: Fixed column order and visibility for all tables.
+# FINAL COMPLETE & CORRECTED VERSION: Re-inserted the critical cloud download logic.
 
 import streamlit as st
 import pandas as pd
@@ -84,8 +84,26 @@ def authenticate_user(session, username, password):
 # --- Cache-safe Database Setup ---
 def download_and_setup_db():
     if IS_CLOUD and not os.path.exists(LOCAL_DB_PATH):
-        # UI elements for download would go here if needed
-        pass
+        # --- CRITICAL FIX: RE-INSERTED THE DOWNLOAD LOGIC ---
+        info_message = st.info("מוריד את בסיס הנתונים מ-Hugging Face... ☁️")
+        progress_bar = st.progress(0, text="מתחיל הורדה...")
+        try:
+            with requests.get(DB_URL, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0)) or None
+                bytes_downloaded = 0
+                with open(LOCAL_DB_PATH, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if not chunk: continue
+                        f.write(chunk)
+                        if total_size:
+                            bytes_downloaded += len(chunk)
+                            progress = bytes_downloaded / total_size
+                            progress_bar.progress(progress, text=f"מוריד... {int(progress * 100)}%")
+            progress_bar.empty(); info_message.success("הורדת בסיס הנתונים הושלמה!"); time.sleep(1.5); info_message.empty()
+        except requests.exceptions.RequestException as e:
+            progress_bar.empty(); info_message.empty(); st.error(f"שגיאה בהורדת בסיס הנתונים: {e}"); return False
+        
     if not os.path.exists(LOCAL_DB_PATH):
         st.error(f"קובץ בסיס הנתונים '{LOCAL_DB_PATH}' לא נמצא."); return False
     try:
@@ -276,10 +294,8 @@ def main():
                     comments_df = get_comments('findings')
                     display_df = merge_data_with_comments(df.copy(), comments_df)
                     display_df = display_df[[c for c in display_df.columns if c != 'הערות'] + ['הערות']]
-                    
                     edited_df = st.data_editor(display_df, disabled=[c for c in df.columns], key=f"editor_{name}", hide_index=True, use_container_width=True,
                                                column_config={"record_id": None, "הערות": st.column_config.TextColumn(width="large")})
-                    
                     if not edited_df.equals(display_df):
                         handle_comment_update(display_df, edited_df, 'findings', st.session_state.user_id, st.session_state.username)
                 else: st.write("לא נמצאו ממצאים.")
